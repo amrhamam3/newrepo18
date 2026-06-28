@@ -3,15 +3,18 @@ package com.amr3d.preview.pro
 import android.content.Context
 import android.net.Uri
 
-// 1. الفئات المساعدة لبيانات المجسم والاستثناءات
 class StlParseException(message: String) : Exception(message)
-data class StlModel(val vertices: FloatArray, val normals: FloatArray, val boundingBox: FloatArray)
+
+data class StlModel(
+    val vertices: FloatArray,
+    val normals: FloatArray,
+    val boundingBox: FloatArray
+)
 
 object DxfParser {
     private data class DxfPair(val code: Int, val value: String)
 
     fun parse(context: Context, uri: Uri): StlModel {
-        // قراءة الملف بالكامل بترميز متوافق مع ملفات الـ CAD
         val text = context.contentResolver.openInputStream(uri)?.use {
             it.bufferedReader(Charsets.ISO_8859_1).readText()
         } ?: throw StlParseException("تعذر فتح ملف dxf")
@@ -20,7 +23,6 @@ object DxfParser {
         val pairs = mutableListOf<DxfPair>()
         var idx = 0
         
-        // تحويل النص إلى أزواج (كود وقيمة)
         while (idx < rawLines.size - 1) {
             val code = rawLines[idx].trim().toIntOrNull()
             val value = rawLines[idx + 1].trim()
@@ -28,7 +30,6 @@ object DxfParser {
             idx += 2
         }
 
-        // 2. تحديد بداية ونهاية قسم العناصر (ENTITIES)
         var entStart = -1
         var entEnd = pairs.size
         for (k in pairs.indices) {
@@ -41,28 +42,13 @@ object DxfParser {
 
         if (entStart < 0) throw StlParseException("لم يتم العثور على قسم entities")
 
-        // المصفوفات الديناميكية لتجميع النقاط
         val vertices = mutableListOf<Float>()
         val normals = mutableListOf<Float>()
         
-        // متغيرات حساب أبعاد المجسم (Bounding Box)
         var minX = Float.MAX_VALUE; var maxX = -Float.MAX_VALUE
         var minY = Float.MAX_VALUE; var maxY = -Float.MAX_VALUE
         var minZ = Float.MAX_VALUE; var maxZ = -Float.MAX_VALUE
 
-        // دالة مساعدة داخلية لتحديث الأبعاد وإضافة النقاط
-        fun addVertex(x: Float, y: Float, z: Float) {
-            minX = minOf(minX, x); maxX = maxOf(maxX, x)
-            minY = minOf(minY, y); maxY = maxOf(maxY, y)
-            minZ = minOf(minZ, z); maxZ = maxOf(maxZ, z)
-            vertices.add(x)
-            vertices.add(y)
-            vertices.add(z)
-            // إضافة مَواجهات افتراضية (Normal) لكل نقطة
-            normals.addAll(listOf(0f, 0f, 1f))
-        }
-
-        // 3. قراءة وتحليل العناصر داخل القسم
         var pos = entStart
         while (pos  {
                         pos++
@@ -79,12 +65,22 @@ object DxfParser {
                             }
                             pos++
                         }
-                        addVertex(x1, y1, z1)
-                        addVertex(x2, y2, z2)
-                        continue
+                        
+                        // حساب الـ Bounding Box للنقطة الأولى
+                        minX = minOf(minX, x1); maxX = maxOf(maxX, x1)
+                        minY = minOf(minY, y1); maxY = maxOf(maxY, y1)
+                        minZ = minOf(minZ, z1); maxZ = maxOf(maxZ, z1)
+                        vertices.addAll(listOf(x1, y1, z1))
+                        normals.addAll(listOf(0f, 0f, 1f))
+
+                        // حساب الـ Bounding Box للنقطة الثانية
+                        minX = minOf(minX, x2); maxX = maxOf(maxX, x2)
+                        minY = minOf(minY, y2); maxY = maxOf(maxY, y2)
+                        minZ = minOf(minZ, z2); maxZ = maxOf(maxZ, z2)
+                        vertices.addAll(listOf(x2, y2, z2))
+                        normals.addAll(listOf(0f, 0f, 1f))
                     }
 
-                    // معالجة الخطوط المتصلة (أوتوكاد القياسي)
                     "LWPOLYLINE" -> {
                         pos++
                         val polyVertices = mutableListOf<Pair<Float, Float>>()
@@ -106,21 +102,32 @@ object DxfParser {
                             pos++
                         }
                         
-                        // ربط النقاط المتتالية كخطوط ثنائية
                         for (i in 0 until polyVertices.size - 1) {
                             val p1 = polyVertices[i]
                             val p2 = polyVertices[i + 1]
-                            addVertex(p1.first, p1.second, elevation)
-                            addVertex(p2.first, p2.second, elevation)
+                            
+                            // إضافة النقطة الأولى للمقطع
+                            minX = minOf(minX, p1.first); maxX = maxOf(maxX, p1.first)
+                            minY = minOf(minY, p1.second); maxY = maxOf(maxY, p1.second)
+                            minZ = minOf(minZ, elevation); maxZ = maxOf(maxZ, elevation)
+                            vertices.addAll(listOf(p1.first, p1.second, elevation))
+                            normals.addAll(listOf(0f, 0f, 1f))
+
+                            // إضافة النقطة الثانية للمقطع
+                            minX = minOf(minX, p2.first); maxX = maxOf(maxX, p2.first)
+                            minY = minOf(minY, p2.second); maxY = maxOf(maxY, p2.second)
+                            minZ = minOf(minZ, elevation); maxZ = maxOf(maxZ, elevation)
+                            vertices.addAll(listOf(p2.first, p2.second, elevation))
+                            normals.addAll(listOf(0f, 0f, 1f))
                         }
-                        continue
                     }
+                    else -> pos++
                 }
+            } else {
+                pos++
             }
-            pos++
         }
 
-        // إذا لم يتم العثور على أي نقاط، نضع قيم افتراضية للـ Bounding Box لمنع الخطأ
         if (vertices.isEmpty()) {
             minX = 0f; maxX = 0f; minY = 0f; maxY = 0f; minZ = 0f; maxZ = 0f
         }
