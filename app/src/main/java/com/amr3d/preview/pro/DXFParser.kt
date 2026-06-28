@@ -2,22 +2,25 @@ package com.amr3d.preview.pro
 
 import android.content.Context
 import android.net.Uri
-import kotlin.math.cos
-import kotlin.math.sin
-import kotlin.math.sqrt
 
-object DXFParser {
+// 1. الفئات المساعدة لبيانات المجسم والاستثناءات
+class StlParseException(message: String) : Exception(message)
+data class StlModel(val vertices: FloatArray, val normals: FloatArray, val boundingBox: FloatArray)
 
+object DxfParser {
     private data class DxfPair(val code: Int, val value: String)
 
-    fun parse(context: Context, uri: Uri): STLModel {
+    fun parse(context: Context, uri: Uri): StlModel {
+        // قراءة الملف بالكامل بترميز متوافق مع ملفات الـ CAD
         val text = context.contentResolver.openInputStream(uri)?.use {
             it.bufferedReader(Charsets.ISO_8859_1).readText()
-        } ?: throw STLParseException("تعذر فتح ملف DXF")
+        } ?: throw StlParseException("تعذر فتح ملف dxf")
 
         val rawLines = text.lines()
         val pairs = mutableListOf<DxfPair>()
         var idx = 0
+        
+        // تحويل النص إلى أزواج (كود وقيمة)
         while (idx < rawLines.size - 1) {
             val code = rawLines[idx].trim().toIntOrNull()
             val value = rawLines[idx + 1].trim()
@@ -25,192 +28,104 @@ object DXFParser {
             idx += 2
         }
 
-        // إيجاد الـ ENTITIES section
+        // 2. تحديد بداية ونهاية قسم العناصر (ENTITIES)
         var entStart = -1
         var entEnd = pairs.size
         for (k in pairs.indices) {
-            if (pairs[k].code == 2 && pairs[k].value == "ENTITIES") entStart = k
-            if (entStart > 0 && pairs[k].code == 0 && pairs[k].value == "ENDSEC" && k > entStart) {
+            if (pairs[k].code == 2 && pairs[k].value.uppercase() == "ENTITIES") entStart = k
+            if (entStart > 0 && pairs[k].code == 0 && pairs[k].value.uppercase() == "ENDSEC" && k > entStart) {
                 entEnd = k
                 break
             }
         }
-        if (entStart < 0) throw STLParseException("لم يتم العثور على قسم ENTITIES")
 
+        if (entStart < 0) throw StlParseException("لم يتم العثور على قسم entities")
+
+        // المصفوفات الديناميكية لتجميع النقاط
         val vertices = mutableListOf<Float>()
         val normals = mutableListOf<Float>()
+        
+        // متغيرات حساب أبعاد المجسم (Bounding Box)
         var minX = Float.MAX_VALUE; var maxX = -Float.MAX_VALUE
         var minY = Float.MAX_VALUE; var maxY = -Float.MAX_VALUE
+        var minZ = Float.MAX_VALUE; var maxZ = -Float.MAX_VALUE
 
+        // دالة مساعدة داخلية لتحديث الأبعاد وإضافة النقاط
+        fun addVertex(x: Float, y: Float, z: Float) {
+            minX = minOf(minX, x); maxX = maxOf(maxX, x)
+            minY = minOf(minY, y); maxY = maxOf(maxY, y)
+            minZ = minOf(minZ, z); maxZ = maxOf(maxZ, z)
+            vertices.add(x)
+            vertices.add(y)
+            vertices.add(z)
+            // إضافة مَواجهات افتراضية (Normal) لكل نقطة
+            normals.addAll(listOf(0f, 0f, 1f))
+        }
+
+        // 3. قراءة وتحليل العناصر داخل القسم
         var pos = entStart
-        while (pos < entEnd) {
-            val pair = pairs[pos]
-            when {
-                pair.code == 0 && pair.value == "LINE" -> {
-                    pos++
-                    var x1 = 0f; var y1 = 0f; var x2 = 0f; var y2 = 0f
-                    while (pos < entEnd && pairs[pos].code != 0) {
-                        when (pairs[pos].code) {
-                            10 -> x1 = pairs[pos].value.toFloatOrNull() ?: 0f
-                            20 -> y1 = pairs[pos].value.toFloatOrNull() ?: 0f
-                            11 -> x2 = pairs[pos].value.toFloatOrNull() ?: 0f
-                            21 -> y2 = pairs[pos].value.toFloatOrNull() ?: 0f
-                        }
+        while (pos  {
                         pos++
-                    }
-                    addLine(vertices, normals, x1, y1, x2, y2)
-                    minX = minOf(minX, x1, x2); maxX = maxOf(maxX, x1, x2)
-                    minY = minOf(minY, y1, y2); maxY = maxOf(maxY, y1, y2)
-                }
-
-                pair.code == 0 && pair.value == "LWPOLYLINE" -> {
-                    pos++
-                    val pts = mutableListOf<Pair<Float, Float>>()
-                    var closed = false
-                    var cx = 0f; var cy = 0f; var hasX = false
-                    while (pos < entEnd && pairs[pos].code != 0) {
-                        when (pairs[pos].code) {
-                            70 -> closed = (pairs[pos].value.trim().toIntOrNull() ?: 0) and 1 != 0
-                            10 -> { cx = pairs[pos].value.toFloatOrNull() ?: 0f; hasX = true }
-                            20 -> {
-                                cy = pairs[pos].value.toFloatOrNull() ?: 0f
-                                if (hasX) { pts.add(Pair(cx, cy)); hasX = false }
+                        var x1 = 0f; var y1 = 0f; var z1 = 0f
+                        var x2 = 0f; var y2 = 0f; var z2 = 0f
+                        while (pos < entEnd && pairs[pos].code != 0) {
+                            when (pairs[pos].code) {
+                                10 -> x1 = pairs[pos].value.toFloatOrNull() ?: 0f
+                                20 -> y1 = pairs[pos].value.toFloatOrNull() ?: 0f
+                                30 -> z1 = pairs[pos].value.toFloatOrNull() ?: 0f
+                                11 -> x2 = pairs[pos].value.toFloatOrNull() ?: 0f
+                                21 -> y2 = pairs[pos].value.toFloatOrNull() ?: 0f
+                                31 -> z2 = pairs[pos].value.toFloatOrNull() ?: 0f
                             }
+                            pos++
                         }
-                        pos++
+                        addVertex(x1, y1, z1)
+                        addVertex(x2, y2, z2)
+                        continue
                     }
-                    for (k in 0 until pts.size - 1) {
-                        addLine(vertices, normals, pts[k].first, pts[k].second, pts[k+1].first, pts[k+1].second)
-                        minX = minOf(minX, pts[k].first, pts[k+1].first)
-                        maxX = maxOf(maxX, pts[k].first, pts[k+1].first)
-                        minY = minOf(minY, pts[k].second, pts[k+1].second)
-                        maxY = maxOf(maxY, pts[k].second, pts[k+1].second)
-                    }
-                    if (closed && pts.size > 1) {
-                        addLine(vertices, normals, pts.last().first, pts.last().second, pts.first().first, pts.first().second)
-                    }
-                }
 
-                pair.code == 0 && pair.value == "POLYLINE" -> {
-                    pos++
-                    var closed = false
-                    val pts = mutableListOf<Pair<Float, Float>>()
-                    while (pos < entEnd && !(pairs[pos].code == 0 && pairs[pos].value == "SEQEND")) {
-                        if (pairs[pos].code == 70) {
-                            closed = (pairs[pos].value.trim().toIntOrNull() ?: 0) and 1 != 0
-                            pos++
-                        } else if (pairs[pos].code == 0 && pairs[pos].value == "VERTEX") {
-                            pos++
-                            var vx = 0f; var vy = 0f
-                            while (pos < entEnd && pairs[pos].code != 0) {
-                                when (pairs[pos].code) {
-                                    10 -> vx = pairs[pos].value.toFloatOrNull() ?: 0f
-                                    20 -> vy = pairs[pos].value.toFloatOrNull() ?: 0f
+                    // معالجة الخطوط المتصلة (أوتوكاد القياسي)
+                    "LWPOLYLINE" -> {
+                        pos++
+                        val polyVertices = mutableListOf<Pair<Float, Float>>()
+                        var elevation = 0f
+                        
+                        while (pos < entEnd && pairs[pos].code != 0) {
+                            when (pairs[pos].code) {
+                                38 -> elevation = pairs[pos].value.toFloatOrNull() ?: 0f
+                                10 -> {
+                                    val nextX = pairs[pos].value.toFloatOrNull() ?: 0f
+                                    var nextY = 0f
+                                    if (pos + 1 < entEnd && pairs[pos + 1].code == 20) {
+                                        nextY = pairs[pos + 1].value.toFloatOrNull() ?: 0f
+                                        pos++
+                                    }
+                                    polyVertices.add(Pair(nextX, nextY))
                                 }
-                                pos++
                             }
-                            pts.add(Pair(vx, vy))
-                        } else {
                             pos++
                         }
-                    }
-                    for (k in 0 until pts.size - 1) {
-                        addLine(vertices, normals, pts[k].first, pts[k].second, pts[k+1].first, pts[k+1].second)
-                        minX = minOf(minX, pts[k].first, pts[k+1].first)
-                        maxX = maxOf(maxX, pts[k].first, pts[k+1].first)
-                        minY = minOf(minY, pts[k].second, pts[k+1].second)
-                        maxY = maxOf(maxY, pts[k].second, pts[k+1].second)
-                    }
-                    if (closed && pts.size > 1) {
-                        addLine(vertices, normals, pts.last().first, pts.last().second, pts.first().first, pts.first().second)
-                    }
-                    // تخطي SEQEND
-                    if (pos < entEnd) pos++
-                }
-
-                pair.code == 0 && pair.value == "CIRCLE" -> {
-                    pos++
-                    var cx = 0f; var cy = 0f; var r = 0f
-                    while (pos < entEnd && pairs[pos].code != 0) {
-                        when (pairs[pos].code) {
-                            10 -> cx = pairs[pos].value.toFloatOrNull() ?: 0f
-                            20 -> cy = pairs[pos].value.toFloatOrNull() ?: 0f
-                            40 -> r = pairs[pos].value.toFloatOrNull() ?: 0f
+                        
+                        // ربط النقاط المتتالية كخطوط ثنائية
+                        for (i in 0 until polyVertices.size - 1) {
+                            val p1 = polyVertices[i]
+                            val p2 = polyVertices[i + 1]
+                            addVertex(p1.first, p1.second, elevation)
+                            addVertex(p2.first, p2.second, elevation)
                         }
-                        pos++
-                    }
-                    if (r > 0f) {
-                        addArc(vertices, normals, cx, cy, r, 0f, 360f)
-                        minX = minOf(minX, cx - r); maxX = maxOf(maxX, cx + r)
-                        minY = minOf(minY, cy - r); maxY = maxOf(maxY, cy + r)
+                        continue
                     }
                 }
-
-                pair.code == 0 && pair.value == "ARC" -> {
-                    pos++
-                    var cx = 0f; var cy = 0f; var r = 0f; var startA = 0f; var endA = 360f
-                    while (pos < entEnd && pairs[pos].code != 0) {
-                        when (pairs[pos].code) {
-                            10 -> cx = pairs[pos].value.toFloatOrNull() ?: 0f
-                            20 -> cy = pairs[pos].value.toFloatOrNull() ?: 0f
-                            40 -> r = pairs[pos].value.toFloatOrNull() ?: 0f
-                            50 -> startA = pairs[pos].value.toFloatOrNull() ?: 0f
-                            51 -> endA = pairs[pos].value.toFloatOrNull() ?: 360f
-                        }
-                        pos++
-                    }
-                    if (r > 0f) {
-                        addArc(vertices, normals, cx, cy, r, startA, endA)
-                        minX = minOf(minX, cx - r); maxX = maxOf(maxX, cx + r)
-                        minY = minOf(minY, cy - r); maxY = maxOf(maxY, cy + r)
-                    }
-                }
-
-                else -> pos++
             }
+            pos++
         }
 
-        if (vertices.isEmpty()) throw STLParseException("لم يتم العثور على عناصر قابلة للعرض في ملف DXF")
-
-        val vArray = vertices.toFloatArray()
-        val nArray = normals.toFloatArray()
-        return STLModel(
-            vertices = vArray,
-            normals = nArray,
-            triangleCount = vArray.size / 9,
-            minBounds = floatArrayOf(minX, minY, -1f),
-            maxBounds = floatArrayOf(maxX, maxY, 1f),
-            isWatertightHint = false
-        )
-    }
-
-    private fun addLine(verts: MutableList<Float>, norms: MutableList<Float>,
-                        x1: Float, y1: Float, x2: Float, y2: Float) {
-        val dx = x2 - x1; val dy = y2 - y1
-        val len = sqrt(dx * dx + dy * dy).takeIf { it > 0f } ?: return
-        val thickness = maxOf(len * 0.015f, 1f)
-        val nx = -dy / len * thickness; val ny = dx / len * thickness
-        verts.addAll(listOf(x1+nx, y1+ny, 0f, x1-nx, y1-ny, 0f, x2+nx, y2+ny, 0f))
-        repeat(3) { norms.addAll(listOf(0f, 0f, 1f)) }
-        verts.addAll(listOf(x2+nx, y2+ny, 0f, x1-nx, y1-ny, 0f, x2-nx, y2-ny, 0f))
-        repeat(3) { norms.addAll(listOf(0f, 0f, 1f)) }
-    }
-
-    private fun addArc(verts: MutableList<Float>, norms: MutableList<Float>,
-                       cx: Float, cy: Float, r: Float, startDeg: Float, endDeg: Float) {
-        val segments = 64
-        var end = endDeg
-        if (end <= startDeg) end += 360f
-        val totalAngle = end - startDeg
-        val thickness = maxOf(r * 0.015f, 1f)
-        val r1 = r - thickness; val r2 = r + thickness
-        for (s in 0 until segments) {
-            val a1 = Math.toRadians((startDeg + s * totalAngle / segments).toDouble()).toFloat()
-            val a2 = Math.toRadians((startDeg + (s + 1) * totalAngle / segments).toDouble()).toFloat()
-            verts.addAll(listOf(cx+r1*cos(a1), cy+r1*sin(a1), 0f, cx+r2*cos(a1), cy+r2*sin(a1), 0f, cx+r1*cos(a2), cy+r1*sin(a2), 0f))
-            repeat(3) { norms.addAll(listOf(0f, 0f, 1f)) }
-            verts.addAll(listOf(cx+r2*cos(a1), cy+r2*sin(a1), 0f, cx+r2*cos(a2), cy+r2*sin(a2), 0f, cx+r1*cos(a2), cy+r1*sin(a2), 0f))
-            repeat(3) { norms.addAll(listOf(0f, 0f, 1f)) }
+        // إذا لم يتم العثور على أي نقاط، نضع قيم افتراضية للـ Bounding Box لمنع الخطأ
+        if (vertices.isEmpty()) {
+            minX = 0f; maxX = 0f; minY = 0f; maxY = 0f; minZ = 0f; maxZ = 0f
         }
+
+        val boundingBox = floatArrayOf(minX, maxX, minY, maxY, minZ, maxZ)
+        return StlModel(vertices.toFloatArray(), normals.toFloatArray(), boundingBox)
     }
 }
